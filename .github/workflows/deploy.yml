@@ -2,8 +2,11 @@ name: Deploy Secure API Function App
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+
+env:
+  FUNCTIONAPP_NAME: secure-api-func-jiga        
+  PROJECT_PATH: ./src                              
 
 jobs:
   build-and-deploy:
@@ -13,27 +16,61 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up .NET
+      - name: Set up .NET (8.x)
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '8.0.x'
 
-      - name: Log in to Azure
+      - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Restore dependencies
-        run: dotnet restore ./src
+      - name: Restore
+        run: dotnet restore $PROJECT_PATH
 
-      - name: Build
-        run: dotnet build ./src --configuration Release
+      - name: Build (Release)
+        run: dotnet build $PROJECT_PATH --configuration Release --no-restore
 
-      - name: Publish
-        run: dotnet publish ./src --configuration Release --output ./publish
+      - name: Publish to folder
+        run: dotnet publish $PROJECT_PATH --configuration Release --output ./publish --no-build
 
       - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
         with:
-          app-name: secure-api-func-jiga
+          app-name: ${{ env.FUNCTIONAPP_NAME }}
           package: ./publish
+
+      - name: Restart Function App (post-deploy)
+        run: |
+          az functionapp restart \
+            --name $FUNCTIONAPP_NAME \
+            --resource-group rg-secure-api-northeurope
+
+      - name: Smoke test via APIM
+        env:
+          APIM_BASE_URL: ${{ secrets.APIM_BASE_URL }}
+          APIM_SUBSCRIPTION_KEY: ${{ secrets.APIM_SUBSCRIPTION_KEY }}
+        run: |
+          set -e
+          echo "Calling: $APIM_BASE_URL/GetCustomer"
+          http_code=$(curl -s -o response.json -w "%{http_code}" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_SUBSCRIPTION_KEY" \
+            "$APIM_BASE_URL/GetCustomer")
+
+          echo "HTTP $http_code"
+          cat response.json || true
+
+          if [ "$http_code" != "200" ]; then
+            echo "APIM smoke test failed (expected 200)."
+            exit 1
+          fi
+
+          # Optional quick assertion on the body:
+          if ! grep -q '"id":' response.json; then
+            echo "Response body check failed: 'id' not found."
+            exit 1
+          fi
+
+          echo "APIM smoke test passed "
+
